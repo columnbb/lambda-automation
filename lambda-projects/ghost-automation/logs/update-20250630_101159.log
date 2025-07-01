@@ -1,0 +1,81 @@
+日誌檔案: /home/cloudshell-user/lambda-projects/ghost-automation/logs/update-20250630_101159.log
+正在清理舊提示詞檔案...
+✅ 已刪除舊提示詞檔案
+請上傳新的 ghost_prompt_tw.txt 檔案到 CloudShell 主目錄
+上傳完成後，按 Enter 繼續...
+✅ 找到提示詞檔案: /home/cloudshell-user/ghost_prompt_tw.txt
+檔案大小: 681 bytes
+檔案內容開頭: 你是專業的區塊鏈新聞編譯專家，請將以下英文新聞翻譯並改寫為繁體中文。
+
+正在清理舊的層結構...
+✅ 提示詞檔案已複製到層結構
+  adding: assets/ (stored 0%)
+  adding: assets/prompts/ (stored 0%)
+  adding: assets/prompts/ghost_prompt_tw.txt (deflated 30%)
+✅ 層打包成功: prompts-layer-20250630_101226.zip
+正在發佈新層版本...
+✅ 層發佈成功
+新層版本 ARN: arn:aws:lambda:ap-southeast-2:324183266130:layer:prompts-layer:3
+正在更新 Lambda 函數...
+{
+    "FunctionName": "GhostPerplexityDemo",
+    "FunctionArn": "arn:aws:lambda:ap-southeast-2:324183266130:function:GhostPerplexityDemo",
+    "Runtime": "python3.13",
+    "Role": "arn:aws:iam::324183266130:role/service-role/GhostPerplexityDemo-role-bmf7y2hx",
+    "Handler": "lambda_function.lambda_handler",
+    "CodeSize": 1133710,
+    "Description": "",
+    "Timeout": 60,
+    "MemorySize": 128,
+    "LastModified": "2025-06-30T10:12:32.000+0000",
+    "CodeSha256": "3vGVHjk2hbj8Syo93JdJJiX8czbdeeLChod3I42rYfs=",
+    "Version": "$LATEST",
+    "Environment": {
+        "Variables": {
+            "GHOST_ADMIN_KEY": "685e7058b488070001c4db7d:60b446a0f43b5a5b504867af5dd75ab873afd7aaf469ae58d6e7154fce4016b1",
+            "PERPLEXITY_MODEL": "sonar-pro",
+            "PERPLEXITY_API_KEY": "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",
+            "PERPLEXITY_MODE": "medium",
+            "GHOST_BLOG_URL": "https://zui-xin-qu-kuai-lian.ghost.io/"
+        }
+    },
+    "TracingConfig": {
+        "Mode": "PassThrough"
+    },
+    "RevisionId": "1dcc20bf-3dd5-404e-9a2d-7c54678f8d9f",
+    "Layers": [
+        {
+            "Arn": "arn:aws:lambda:ap-southeast-2:324183266130:layer:blockchain-dependencies:1",
+            "CodeSize": 1152944
+        },
+        {
+            "Arn": "arn:aws:lambda:ap-southeast-2:324183266130:layer:prompts-layer:3",
+            "CodeSize": 993
+        }
+    ],
+    "State": "Active",
+    "LastUpdateStatus": "InProgress",
+    "LastUpdateStatusReason": "The function is being created.",
+    "LastUpdateStatusReasonCode": "Creating",
+    "PackageType": "Zip",
+    "Architectures": [
+        "x86_64"
+    ],
+    "EphemeralStorage": {
+        "Size": 512
+    },
+    "SnapStart": {
+        "ApplyOn": "None",
+        "OptimizationStatus": "Off"
+    },
+    "RuntimeVersionConfig": {
+        "RuntimeVersionArn": "arn:aws:lambda:ap-southeast-2::runtime:f10b100a00b6c2fc7052100b08a13d8c6dc4176c7c01a522d2fb9c948bab31f0"
+    },
+    "LoggingConfig": {
+        "LogFormat": "Text",
+        "LogGroup": "/aws/lambda/GhostPerplexityDemo"
+    }
+}
+✅ Lambda 函數更新成功
+🎉 提示詞層更新完成！
+=== 更新完成 2025-06-30 10:12:32 ===
