@@ -1,7 +1,11 @@
+# 決定採用 AWS＋Perplexity＋StableDiffusion＋Hugo＋Netligy 架構
+# 處理Perplexity回應超時問題，增加等待時間，增加記憶體
 import os
 import sys
 import json
 import re
+import boto3
+from io import BytesIO
 
 # 添加依賴層路徑
 sys.path.append('/opt/python')
@@ -14,6 +18,66 @@ import time
 
 # 提示詞層路徑
 PROMPTS_DIR = '/opt/assets/prompts'
+
+def load_sd_prompt_config():
+    try:
+        with open(os.path.join(PROMPTS_DIR, 'sd_prompt_config.json'), 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"SD提示詞配置加載失敗: {str(e)}")
+        return {
+            "default_style": "realistic",
+            "negative_prompt": "",
+            "resolution_ratio": 1.77
+        }
+
+def generate_sd_prompt(title, style_override=None):
+    config = load_sd_prompt_config()
+    style = style_override or config.get('default_style', 'realistic')
+    with open(os.path.join(PROMPTS_DIR, 'sd_prompt_template.txt'), 'r') as f:
+        template = f.read().strip()
+    return template.format(title=title, style=style)
+
+def generate_and_upload_image(title, bucket_name):
+    try:
+        prompt = generate_sd_prompt(title)
+        config = load_sd_prompt_config()
+        # 解析resolution
+        resolution = config.get('resolution', '1024x576')
+        if 'x' in resolution:
+            width, height = [int(x) for x in resolution.split('x')]
+        else:
+            width, height = 1024, 576
+
+        response = requests.post(
+            "https://api.stability.ai/v2beta/stable-image/generate/sd3",
+            headers={
+                "Authorization": f"Bearer {os.environ['STABILITY_API_KEY']}",
+                "Accept": "image/*"
+            },
+            files={"none": ''},
+            data={
+                "prompt": prompt,
+                "output_format": "png",
+                "negative_prompt": config.get('negative_prompt', ''),
+                "width": width,
+                "height": height
+            }
+        )
+        if response.status_code != 200:
+            raise Exception(f"API錯誤: {response.text}")
+
+        s3 = boto3.client('s3')
+        image_key = f"images/{int(time.time())}.png"
+        s3.upload_fileobj(BytesIO(response.content), bucket_name, image_key)
+        return s3.generate_presigned_url(
+            'get_object',
+            Params={'Bucket': bucket_name, 'Key': image_key},
+            ExpiresIn=604800
+        )
+    except Exception as e:
+        print(f"圖片生成失敗: {str(e)}")
+        return "https://example.com/default-image.png"
 
 def generate_ghost_token(admin_key):
     """生成 Ghost 專用 JWT 授權令牌"""
@@ -54,9 +118,30 @@ def test_layers():
             files = os.listdir(PROMPTS_DIR)
             print(f"✅ 提示詞目錄存在，內容: {files}")
             
+            # 測試主提示詞
             prompt = load_prompt_template()
             print(f"✅ 提示詞載入成功，長度: {len(prompt)} 字元")
             print(f"✅ 提示詞開頭: {prompt[:50]}...")
+            
+            # ===== 新增 SD 提示詞測試 =====
+            try:
+                # 測試 SD 配置
+                sd_config = load_sd_prompt_config()
+                print(f"✅ SD提示詞配置載入成功: {json.dumps(sd_config, ensure_ascii=False)}")
+                
+                # 測試 SD 模板
+                sd_template_path = os.path.join(PROMPTS_DIR, 'sd_prompt_template.txt')
+                with open(sd_template_path, 'r', encoding='utf-8') as f:
+                    sd_template = f.read().strip()
+                print(f"✅ SD 提示詞模板載入成功，長度: {len(sd_template)} 字元")
+                print(f"✅ SD 提示詞模板開頭: {sd_template[:50]}...")
+                
+                # 測試動態提示詞生成
+                test_title = "區塊鏈技術革命"
+                generated_prompt = generate_sd_prompt(test_title)
+                print(f"✅ 動態提示詞生成測試: {generated_prompt}")
+            except Exception as sd_e:
+                print(f"❌ SD提示詞測試失敗: {str(sd_e)}")
         else:
             print("❌ 提示詞目錄不存在")
     except Exception as e:
@@ -188,10 +273,10 @@ def lambda_handler(event, context):
                 "https://api.perplexity.ai/chat/completions",
                 json=payload,
                 headers=headers,
-                timeout=30
+                timeout=(30, 180)  # 連接超時30秒，讀取超時180秒
             )
             response.raise_for_status()
-            
+
             # 解析 AI 回應
             ai_output = response.json()['choices'][0]['message']['content']
             
@@ -204,6 +289,13 @@ def lambda_handler(event, context):
             
             if not title or not content:
                 raise ValueError("標題或內文解析為空")
+            
+            # 生成插圖
+            image_url = generate_and_upload_image(
+                title=title,
+                bucket_name=os.environ['S3_BUCKET_NAME']
+                )
+            md_content = f"![生成插圖]({image_url})\n\n{content}"
             
             # 生成 Ghost JWT
             ghost_token = generate_ghost_token(ghost_admin_key)
@@ -254,7 +346,15 @@ def lambda_handler(event, context):
                 "source": article['source'],
                 "status": "success"
             })
-            
+
+        except requests.exceptions.Timeout:
+            print(f"⏰ Perplexity API 超時: {article['url']}")
+            continue  # 跳過這篇文章，處理下一篇
+    
+        except requests.exceptions.RequestException as e:
+            print(f"🔗 網路連線錯誤: {str(e)}")
+            continue
+
         except Exception as e:
             error_detail = f"❌ 處理失敗: {article['url']} | 錯誤: {type(e).__name__}-{str(e)[:100]}"
             print(error_detail)
