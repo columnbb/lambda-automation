@@ -1,0 +1,6 @@
+{
+  "default_style": "cyberpunk",
+  "negative_prompt": "blurry, low quality",
+  "resolution_ratio": 1.77,
+  "resolution": "1024x576"
+}

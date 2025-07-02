@@ -1,11 +1,18 @@
 # 決定採用 AWS＋Perplexity＋StableDiffusion＋Hugo＋Netligy 架構
-# 處理Perplexity回應超時問題，增加等待時間，增加記憶體
+# 018 提示詞改放S3、免責聲明強制附加
 import os
 import sys
 import json
 import re
 import boto3
 from io import BytesIO
+
+# 從 S3 讀取提示詞載入程式碼
+def load_file_from_s3(bucket, key):
+    """從 S3 讀取文字檔案並回傳字串"""
+    s3 = boto3.client('s3')
+    obj = s3.get_object(Bucket=bucket, Key=key)
+    return obj['Body'].read().decode('utf-8')
 
 # 添加依賴層路徑
 sys.path.append('/opt/python')
@@ -21,8 +28,10 @@ PROMPTS_DIR = '/opt/assets/prompts'
 
 def load_sd_prompt_config():
     try:
-        with open(os.path.join(PROMPTS_DIR, 'sd_prompt_config.json'), 'r') as f:
-            return json.load(f)
+        bucket = os.environ['S3_BUCKET_NAME']
+        key = 'prompts/sd_prompt_config.json'
+        content = load_file_from_s3(bucket, key)
+        return json.loads(content)
     except Exception as e:
         print(f"SD提示詞配置加載失敗: {str(e)}")
         return {
@@ -34,9 +43,11 @@ def load_sd_prompt_config():
 def generate_sd_prompt(title, style_override=None):
     config = load_sd_prompt_config()
     style = style_override or config.get('default_style', 'realistic')
-    with open(os.path.join(PROMPTS_DIR, 'sd_prompt_template.txt'), 'r') as f:
-        template = f.read().strip()
+    bucket = os.environ['S3_BUCKET_NAME']
+    key = 'prompts/sd_prompt_template.txt'
+    template = load_file_from_s3(bucket, key).strip()
     return template.format(title=title, style=style)
+
 
 def generate_and_upload_image(title, bucket_name):
     try:
@@ -87,15 +98,16 @@ def generate_ghost_token(admin_key):
         header = {'alg': 'HS256', 'typ': 'JWT', 'kid': id}
         payload = {'iat': iat, 'exp': iat + 300, 'aud': '/admin/'}
         return jwt.encode(payload, bytes.fromhex(secret), algorithm='HS256', headers=header)
-    except Exception as e:
+    except Exception as e:  
         print(f"JWT生成失敗: {str(e)}")
         raise
 
 def load_prompt_template():
     """從提示詞層載入提示詞模板"""
     try:
-        with open(os.path.join(PROMPTS_DIR, 'ghost_prompt_tw.txt'), 'r', encoding='utf-8') as f:
-            return f.read().strip()
+        bucket = os.environ['S3_BUCKET_NAME']
+        key = 'prompts/ghost_prompt_tw.txt'
+        return load_file_from_s3(bucket, key).strip()
     except Exception as e:
         print(f"提示詞載入失敗: {str(e)}")
         raise
@@ -153,13 +165,32 @@ def parse_ai_response(ai_output):
     """使用正則表達式解析 AI 回應"""
     try:
         title_match = re.search(r'【標題：】\s*(.+?)(?:\n|【內文：】|$)', ai_output, re.DOTALL)
-        content_match = re.search(r'【內文：】\s*(.+?)(?:\*\*授權與免責聲明\*\*|$)', ai_output, re.DOTALL)
+        # 修改：包含完整內容，包括免責聲明
+        content_match = re.search(r'【內文：】\s*(.+)', ai_output, re.DOTALL)
         title = title_match.group(1).strip() if title_match else ""
         content = content_match.group(1).strip() if content_match else ""
         return title, content
     except Exception as e:
         print(f"解析錯誤: {str(e)}")
         return "", ""
+
+def has_disclaimer(text: str) -> bool:
+    """檢查文字中是否已包含「授權與免責聲明」段落"""
+    return bool(re.search(r'\*\*授權與免責聲明\*\*', text))
+
+def build_markdown_output(title, content, source, url):
+    disclaimer = (
+        "\n**授權與免責聲明**\n"
+        f"> 本文章根據 {source}（CC-BY 4.0） 內容翻譯改寫，原文連結：{url}\n"
+        "> 本文僅供資訊參考，不構成任何投資建議或法律意見。"
+        "加密貨幣及區塊鏈相關投資具高風險，請審慎評估自身風險承受能力。\n"
+    )
+
+    # 如果 content 已經包含「授權與免責聲明」，就不用再附加
+    if has_disclaimer(content):
+        return f"【標題：】{title}\n\n【內文：】\n{content}"
+    else:
+        return f"【標題：】{title}\n\n【內文：】\n{content}{disclaimer}"
 
 def markdown_to_html(md_content):
     """
@@ -284,11 +315,39 @@ def lambda_handler(event, context):
             print(f"=== Perplexity API 回應內容 ===")
             print(f"回應長度: {len(ai_output)} 字元")
             
+            # 檢查關鍵字與格式
+            title_matches = re.findall(r'【標題：】\s*(.+?)(?:\n|【內文：】|$)', ai_output, re.DOTALL)
+            content_matches = re.findall(r'【內文：】\s*(.+?)(?:\*\*授權與免責聲明\*\*|$)', ai_output, re.DOTALL)
+            disclaimer_matches = re.findall(r'\*\*授權與免責聲明\*\*.*?(?:\n\n|$)', ai_output, re.DOTALL)
+
+            print(f"📋 找到標題數量: {len(title_matches)}")
+            print(f"📋 找到內文數量: {len(content_matches)}")  
+            print(f"📋 找到免責聲明數量: {len(disclaimer_matches)}")
+
+            if title_matches:
+                print(f"📋 標題內容: {title_matches[0][:50]}...")
+            if content_matches:
+                print(f"📋 內文開頭: {content_matches[0][:100]}...")
+            if disclaimer_matches:
+                print(f"📋 免責聲明內容: {disclaimer_matches[0][:100]}...")
+
             # 使用正則解析
             title, content = parse_ai_response(ai_output)
             
             if not title or not content:
                 raise ValueError("標題或內文解析為空")
+            
+            # 解析後的內容檢查
+            parsed_title, parsed_content = parse_ai_response(ai_output)
+            print(f"📋 解析後標題長度: {len(parsed_title)} 字元")
+            print(f"📋 解析後內文長度: {len(parsed_content)} 字元")
+            print(f"📋 解析後內容包含免責聲明: {'✅' if has_disclaimer(parsed_content) else '❌'}")
+
+            # 最終組裝檢查
+            final_markdown = build_markdown_output(parsed_title, parsed_content, article['source'], article['url'])
+            print(f"📋 最終Markdown長度: {len(final_markdown)} 字元")
+            print(f"📋 最終內容包含免責聲明: {'✅' if has_disclaimer(final_markdown) else '❌'}")
+            print(f"📋 最終內容後100字元: {final_markdown[-100:]}")
             
             # 生成插圖
             image_url = generate_and_upload_image(
