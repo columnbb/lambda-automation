@@ -1,10 +1,15 @@
 # 決定採用 AWS＋Perplexity＋StableDiffusion＋Hugo＋Netligy 架構
-# 018 提示詞改放S3、免責聲明強制附加
+# 在 Lambda 中使用 stable-diffusion-xl-1024-v1-0 API 端點，並在Ghost看見創造的圖片
 import os
 import sys
 import json
 import re
 import boto3
+import base64
+import requests
+import feedparser
+import jwt
+import time
 from io import BytesIO
 
 # 從 S3 讀取提示詞載入程式碼
@@ -16,12 +21,6 @@ def load_file_from_s3(bucket, key):
 
 # 添加依賴層路徑
 sys.path.append('/opt/python')
-
-# 現在可以導入 Layer 中的套件
-import requests
-import feedparser
-import jwt
-import time
 
 # 提示詞層路徑
 PROMPTS_DIR = '/opt/assets/prompts'
@@ -48,46 +47,63 @@ def generate_sd_prompt(title, style_override=None):
     template = load_file_from_s3(bucket, key).strip()
     return template.format(title=title, style=style)
 
-
 def generate_and_upload_image(title, bucket_name):
     try:
+        # 1. 準備提示詞
         prompt = generate_sd_prompt(title)
+
+        # 2. 解析解析度
         config = load_sd_prompt_config()
         # 解析resolution
         resolution = config.get('resolution', '1024x576')
         if 'x' in resolution:
             width, height = [int(x) for x in resolution.split('x')]
         else:
-            width, height = 1024, 576
+            # 建議用 1024×1024
+            width, height = 1024, 1024
 
-        response = requests.post(
-            "https://api.stability.ai/v2beta/stable-image/generate/sd3",
-            headers={
-                "Authorization": f"Bearer {os.environ['STABILITY_API_KEY']}",
-                "Accept": "image/*"
-            },
-            files={"none": ''},
-            data={
-                "prompt": prompt,
-                "output_format": "png",
-                "negative_prompt": config.get('negative_prompt', ''),
-                "width": width,
-                "height": height
-            }
-        )
+        # 3. 呼叫 SDXL 1.0 API
+        url = "https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/text-to-image"
+        headers = {
+            "Authorization": f"Bearer {os.environ['STABILITY_API_KEY']}",
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+        }
+        body = {
+            "text_prompts": [
+                {"text": prompt}
+            ],
+            "cfg_scale": config.get('cfg_scale', 7.5),
+            "height": height,
+            "width": width,
+            "samples": 1
+        }
+
+        response = requests.post(url, headers=headers, data=json.dumps(body))
         if response.status_code != 200:
-            raise Exception(f"API錯誤: {response.text}")
+            raise Exception(f"API錯誤:{response.status_code}  {response.text}")
+
+        # 4. 取得 Base64 圖片並上傳至 S3
+        result = response.json()
+        b64 = result["artifacts"][0]["base64"]
+        img_data = BytesIO(base64.b64decode(b64))
 
         s3 = boto3.client('s3')
         image_key = f"images/{int(time.time())}.png"
-        s3.upload_fileobj(BytesIO(response.content), bucket_name, image_key)
+        s3.upload_fileobj(
+            img_data,
+            bucket_name,
+            image_key,
+            ExtraArgs={'ContentType': 'image/png'}
+        )
+        
         return s3.generate_presigned_url(
             'get_object',
             Params={'Bucket': bucket_name, 'Key': image_key},
             ExpiresIn=604800
         )
     except Exception as e:
-        print(f"圖片生成失敗: {str(e)}")
+        print(f"圖片生成或上傳失敗:  {str(e)}")
         return "https://example.com/default-image.png"
 
 def generate_ghost_token(admin_key):
@@ -161,6 +177,40 @@ def test_layers():
     
     print("=== Layer 測試結束 ===")
 
+def check_Perplexity(ai_output, source, url):
+    print(f"=== Perplexity API 檢查內容開始 ===")
+    print(f"回應長度: {len(ai_output)} 字元")   
+            
+    # 檢查關鍵字與格式
+    title_matches = re.findall(r'【標題：】\s*(.+?)(?:\n|【內文：】|$)', ai_output, re.DOTALL)
+    content_matches = re.findall(r'【內文：】\s*(.+?)(?:\*\*授權與免責聲明\*\*|$)', ai_output, re.DOTALL)
+    disclaimer_matches = re.findall(r'\*\*授權與免責聲明\*\*.*?(?:\n\n|$)', ai_output, re.DOTALL)
+
+    print(f"📋 找到標題數量: {len(title_matches)}")
+    print(f"📋 找到內文數量: {len(content_matches)}")  
+    print(f"📋 找到免責聲明數量: {len(disclaimer_matches)}")
+
+    if title_matches:
+        print(f"📋 標題內容: {title_matches[0][:50]}...")
+    if content_matches:
+        print(f"📋 內文開頭: {content_matches[0][:100]}...")
+    if disclaimer_matches:
+        print(f"📋 免責聲明內容: {disclaimer_matches[0][:100]}...")
+
+    # 解析後的內容檢查
+    parsed_title, parsed_content = parse_ai_response(ai_output)
+    print(f"📋 解析後標題長度: {len(parsed_title)} 字元")
+    print(f"📋 解析後內文長度: {len(parsed_content)} 字元")
+    print(f"📋 解析後內容包含免責聲明: {'✅' if has_disclaimer(parsed_content) else '❌'}")
+
+    # 最終組裝檢查
+    final_markdown = build_markdown_output(parsed_title, parsed_content, source, url)
+    print(f"📋 最終Markdown長度: {len(final_markdown)} 字元")
+    print(f"📋 最終內容包含免責聲明: {'✅' if has_disclaimer(final_markdown) else '❌'}")
+    print(f"📋 最終內容後100字元: {final_markdown[-100:]}")
+            
+    print(f"=== Perplexity API 檢查內容結束 ===")
+
 def parse_ai_response(ai_output):
     """使用正則表達式解析 AI 回應"""
     try:
@@ -218,7 +268,7 @@ def markdown_to_html(md_content):
 
 def lambda_handler(event, context):
     # 測試 Layer 是否正確載入
-    test_layers()
+    # test_layers()
     
     # RSS 來源設定
     rss_feeds = [
@@ -311,43 +361,14 @@ def lambda_handler(event, context):
             # 解析 AI 回應
             ai_output = response.json()['choices'][0]['message']['content']
             
-             # 強化日誌輸出
-            print(f"=== Perplexity API 回應內容 ===")
-            print(f"回應長度: {len(ai_output)} 字元")
-            
-            # 檢查關鍵字與格式
-            title_matches = re.findall(r'【標題：】\s*(.+?)(?:\n|【內文：】|$)', ai_output, re.DOTALL)
-            content_matches = re.findall(r'【內文：】\s*(.+?)(?:\*\*授權與免責聲明\*\*|$)', ai_output, re.DOTALL)
-            disclaimer_matches = re.findall(r'\*\*授權與免責聲明\*\*.*?(?:\n\n|$)', ai_output, re.DOTALL)
-
-            print(f"📋 找到標題數量: {len(title_matches)}")
-            print(f"📋 找到內文數量: {len(content_matches)}")  
-            print(f"📋 找到免責聲明數量: {len(disclaimer_matches)}")
-
-            if title_matches:
-                print(f"📋 標題內容: {title_matches[0][:50]}...")
-            if content_matches:
-                print(f"📋 內文開頭: {content_matches[0][:100]}...")
-            if disclaimer_matches:
-                print(f"📋 免責聲明內容: {disclaimer_matches[0][:100]}...")
-
+            # 強化日誌輸出
+            # check_Perplexity(ai_output, article['source'], article['url'])
+           
             # 使用正則解析
             title, content = parse_ai_response(ai_output)
             
             if not title or not content:
                 raise ValueError("標題或內文解析為空")
-            
-            # 解析後的內容檢查
-            parsed_title, parsed_content = parse_ai_response(ai_output)
-            print(f"📋 解析後標題長度: {len(parsed_title)} 字元")
-            print(f"📋 解析後內文長度: {len(parsed_content)} 字元")
-            print(f"📋 解析後內容包含免責聲明: {'✅' if has_disclaimer(parsed_content) else '❌'}")
-
-            # 最終組裝檢查
-            final_markdown = build_markdown_output(parsed_title, parsed_content, article['source'], article['url'])
-            print(f"📋 最終Markdown長度: {len(final_markdown)} 字元")
-            print(f"📋 最終內容包含免責聲明: {'✅' if has_disclaimer(final_markdown) else '❌'}")
-            print(f"📋 最終內容後100字元: {final_markdown[-100:]}")
             
             # 生成插圖
             image_url = generate_and_upload_image(
@@ -383,6 +404,7 @@ def lambda_handler(event, context):
                 "posts": [{
                     "title": title,
                     "mobiledoc": json.dumps(mobiledoc),
+                    "feature_image": image_url,  # 這裡放 Lambda 產生的圖片網址
                     "status": "draft",
                     "tags": ["區塊鏈", "AI生成", "技術分析" if is_technical else "市場動態"]
                 }]
