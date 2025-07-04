@@ -1,5 +1,5 @@
 # 決定採用 AWS＋Perplexity＋StableDiffusion＋Hugo＋Netligy 架構
-# 在 Lambda 中使用 stable-diffusion-xl-1024-v1-0 API 端點，並在Ghost看見創造的圖片
+# 採用Perplexity在改寫或翻譯文章時，同步產生最貼合主題的英文SD提示詞，再傳給SDXL生成插圖。
 import os
 import sys
 import json
@@ -11,6 +11,10 @@ import feedparser
 import jwt
 import time
 from io import BytesIO
+
+# SD圖像生成 API 解析度參數
+SD_RESOLUTION = "1152x896"
+SD_RESOLUTION_RATIO = 1.33
 
 # 從 S3 讀取提示詞載入程式碼
 def load_file_from_s3(bucket, key):
@@ -25,44 +29,11 @@ sys.path.append('/opt/python')
 # 提示詞層路徑
 PROMPTS_DIR = '/opt/assets/prompts'
 
-def load_sd_prompt_config():
+def generate_and_upload_image(sd_prompt, bucket_name):
     try:
-        bucket = os.environ['S3_BUCKET_NAME']
-        key = 'prompts/sd_prompt_config.json'
-        content = load_file_from_s3(bucket, key)
-        return json.loads(content)
-    except Exception as e:
-        print(f"SD提示詞配置加載失敗: {str(e)}")
-        return {
-            "default_style": "realistic",
-            "negative_prompt": "",
-            "resolution_ratio": 1.77
-        }
+        # 1. 呼叫 SDXL 1.0 API
+        width, height = [int(x) for x in SD_RESOLUTION.split('x')]
 
-def generate_sd_prompt(title, style_override=None):
-    config = load_sd_prompt_config()
-    style = style_override or config.get('default_style', 'realistic')
-    bucket = os.environ['S3_BUCKET_NAME']
-    key = 'prompts/sd_prompt_template.txt'
-    template = load_file_from_s3(bucket, key).strip()
-    return template.format(title=title, style=style)
-
-def generate_and_upload_image(title, bucket_name):
-    try:
-        # 1. 準備提示詞
-        prompt = generate_sd_prompt(title)
-
-        # 2. 解析解析度
-        config = load_sd_prompt_config()
-        # 解析resolution
-        resolution = config.get('resolution', '1024x576')
-        if 'x' in resolution:
-            width, height = [int(x) for x in resolution.split('x')]
-        else:
-            # 建議用 1024×1024
-            width, height = 1024, 1024
-
-        # 3. 呼叫 SDXL 1.0 API
         url = "https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/text-to-image"
         headers = {
             "Authorization": f"Bearer {os.environ['STABILITY_API_KEY']}",
@@ -71,9 +42,9 @@ def generate_and_upload_image(title, bucket_name):
         }
         body = {
             "text_prompts": [
-                {"text": prompt}
+                {"text": sd_prompt}
             ],
-            "cfg_scale": config.get('cfg_scale', 7.5),
+            "cfg_scale": 7.5,
             "height": height,
             "width": width,
             "samples": 1
@@ -83,7 +54,7 @@ def generate_and_upload_image(title, bucket_name):
         if response.status_code != 200:
             raise Exception(f"API錯誤:{response.status_code}  {response.text}")
 
-        # 4. 取得 Base64 圖片並上傳至 S3
+        # 2. 取得 Base64 圖片並上傳至 S3
         result = response.json()
         b64 = result["artifacts"][0]["base64"]
         img_data = BytesIO(base64.b64decode(b64))
@@ -150,26 +121,6 @@ def test_layers():
             prompt = load_prompt_template()
             print(f"✅ 提示詞載入成功，長度: {len(prompt)} 字元")
             print(f"✅ 提示詞開頭: {prompt[:50]}...")
-            
-            # ===== 新增 SD 提示詞測試 =====
-            try:
-                # 測試 SD 配置
-                sd_config = load_sd_prompt_config()
-                print(f"✅ SD提示詞配置載入成功: {json.dumps(sd_config, ensure_ascii=False)}")
-                
-                # 測試 SD 模板
-                sd_template_path = os.path.join(PROMPTS_DIR, 'sd_prompt_template.txt')
-                with open(sd_template_path, 'r', encoding='utf-8') as f:
-                    sd_template = f.read().strip()
-                print(f"✅ SD 提示詞模板載入成功，長度: {len(sd_template)} 字元")
-                print(f"✅ SD 提示詞模板開頭: {sd_template[:50]}...")
-                
-                # 測試動態提示詞生成
-                test_title = "區塊鏈技術革命"
-                generated_prompt = generate_sd_prompt(test_title)
-                print(f"✅ 動態提示詞生成測試: {generated_prompt}")
-            except Exception as sd_e:
-                print(f"❌ SD提示詞測試失敗: {str(sd_e)}")
         else:
             print("❌ 提示詞目錄不存在")
     except Exception as e:
@@ -198,9 +149,10 @@ def check_Perplexity(ai_output, source, url):
         print(f"📋 免責聲明內容: {disclaimer_matches[0][:100]}...")
 
     # 解析後的內容檢查
-    parsed_title, parsed_content = parse_ai_response(ai_output)
+    parsed_title, parsed_content, parsed_sd_prompt = parse_ai_response(ai_output)
     print(f"📋 解析後標題長度: {len(parsed_title)} 字元")
     print(f"📋 解析後內文長度: {len(parsed_content)} 字元")
+    print(f"📋 解析後SD提示詞長度: {len(parsed_sd_prompt)} 字元")
     print(f"📋 解析後內容包含免責聲明: {'✅' if has_disclaimer(parsed_content) else '❌'}")
 
     # 最終組裝檢查
@@ -215,14 +167,15 @@ def parse_ai_response(ai_output):
     """使用正則表達式解析 AI 回應"""
     try:
         title_match = re.search(r'【標題：】\s*(.+?)(?:\n|【內文：】|$)', ai_output, re.DOTALL)
-        # 修改：包含完整內容，包括免責聲明
-        content_match = re.search(r'【內文：】\s*(.+)', ai_output, re.DOTALL)
+        content_match = re.search(r'【內文：】\s*(.+?)(?:\n*【圖像提示詞：】|$)', ai_output, re.DOTALL)
+        prompt_match = re.search(r'【圖像提示詞：】\s*(.+)', ai_output, re.DOTALL)
         title = title_match.group(1).strip() if title_match else ""
         content = content_match.group(1).strip() if content_match else ""
-        return title, content
+        sd_prompt = prompt_match.group(1).strip() if prompt_match else ""
+        return title, content, sd_prompt
     except Exception as e:
         print(f"解析錯誤: {str(e)}")
-        return "", ""
+        return "", "", ""
 
 def has_disclaimer(text: str) -> bool:
     """檢查文字中是否已包含「授權與免責聲明」段落"""
@@ -362,17 +315,17 @@ def lambda_handler(event, context):
             ai_output = response.json()['choices'][0]['message']['content']
             
             # 強化日誌輸出
-            # check_Perplexity(ai_output, article['source'], article['url'])
+            check_Perplexity(ai_output, article['source'], article['url'])
            
             # 使用正則解析
-            title, content = parse_ai_response(ai_output)
+            title, content, sd_prompt = parse_ai_response(ai_output)
             
             if not title or not content:
                 raise ValueError("標題或內文解析為空")
             
             # 生成插圖
             image_url = generate_and_upload_image(
-                title=title,
+                sd_prompt=sd_prompt,
                 bucket_name=os.environ['S3_BUCKET_NAME']
                 )
             md_content = f"![生成插圖]({image_url})\n\n{content}"
