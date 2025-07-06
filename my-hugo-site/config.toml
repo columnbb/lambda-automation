@@ -1,4 +1,4 @@
-baseURL = "https://columnbb.github.io/MarkdownArticle/"
+baseURL = "https://crypto-news-blog.netlify.app/"
 title = "My New Hugo Site"
 theme = "LoveIt"
 languageCode = "zh-tw"
