@@ -1,6 +1,6 @@
-baseURL = "https://crypto-news-blog.netlify.app/"
+baseURL = "https://your-crypto-news.netlify.app/"
 title = "My New Hugo Site"
-theme = "LoveIt"
+theme = "ananke"
 languageCode = "zh-tw"
 languageName = "繁體中文"
 
