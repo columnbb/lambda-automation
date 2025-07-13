@@ -1,5 +1,5 @@
 # 決定採用 AWS＋Perplexity＋StableDiffusion＋Hugo＋Netligy 架構
-# 採用Perplexity在改寫或翻譯文章時，同步產生最貼合主題的英文SD提示詞，再傳給SDXL生成插圖。
+# 021 同步儲存文章圖片到 /tmp/content/post、/tmp/static/images並上傳S3，在 Markdown 檔案的最前面插入 front matter，內容包含標題（title）、日期（date）、以及圖片路徑（image）。
 import os
 import sys
 import json
@@ -11,6 +11,10 @@ import feedparser
 import jwt
 import time
 from io import BytesIO
+from datetime import datetime
+
+# 定義一個全域變數 S3_IMG_URL
+S3_IMG_URL = None
 
 # SD圖像生成 API 解析度參數
 SD_RESOLUTION = "1152x896"
@@ -29,11 +33,23 @@ sys.path.append('/opt/python')
 # 提示詞層路徑
 PROMPTS_DIR = '/opt/assets/prompts'
 
-def generate_and_upload_image(sd_prompt, bucket_name):
+# Hugo靜態網頁圖檔存放位置&內容目錄
+# HUGO_STATIC_DIR = "static/images"
+# HUGO_CONTENT_DIR = "content/posts"
+HUGO_CONTENT_DIR = "/tmp/content/posts"
+HUGO_STATIC_DIR = "/tmp/static/images"
+
+
+def generate_save_and_upload_image(sd_prompt, bucket_name):
+    """
+    1. 生成 Stable Diffusion 圖片
+    2. 同步儲存到本地 /tmp/static/images/ 目錄（使用固定常數 HUGO_STATIC_DIR）
+    3. 上傳同一份圖片到 S3
+    4. 回傳圖片檔名供 Markdown front matter 使用；失敗回傳 None
+    """
     try:
         # 1. 呼叫 SDXL 1.0 API
         width, height = [int(x) for x in SD_RESOLUTION.split('x')]
-
         url = "https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/text-to-image"
         headers = {
             "Authorization": f"Bearer {os.environ['STABILITY_API_KEY']}",
@@ -49,33 +65,186 @@ def generate_and_upload_image(sd_prompt, bucket_name):
             "width": width,
             "samples": 1
         }
+        resp = requests.post(url, headers=headers, json=body)
+        resp.raise_for_status()
+        artifact = resp.json()["artifacts"][0]["base64"]
+        img_data = BytesIO(base64.b64decode(artifact))
 
-        response = requests.post(url, headers=headers, data=json.dumps(body))
-        if response.status_code != 200:
-            raise Exception(f"API錯誤:{response.status_code}  {response.text}")
+        # 2. 儲存到本地 Hugo static/images/
+        os.makedirs(HUGO_STATIC_DIR, exist_ok=True)
+        filename = f"{int(time.time())}.png"
+        local_path = os.path.join(HUGO_STATIC_DIR, filename)
+        with open(local_path, "wb") as f:
+            f.write(img_data.getbuffer())
 
-        # 2. 取得 Base64 圖片並上傳至 S3
-        result = response.json()
-        b64 = result["artifacts"][0]["base64"]
-        img_data = BytesIO(base64.b64decode(b64))
-
+        # 3. 上傳到 S3
+        img_data.seek(0)
         s3 = boto3.client('s3')
-        image_key = f"images/{int(time.time())}.png"
+        image_key = f"images/{filename}"
         s3.upload_fileobj(
             img_data,
             bucket_name,
             image_key,
             ExtraArgs={'ContentType': 'image/png'}
         )
-        
-        return s3.generate_presigned_url(
+
+        # 4. 設定全域變數 S3_IMG_URL
+        global S3_IMG_URL
+        S3_IMG_URL = s3.generate_presigned_url(
             'get_object',
             Params={'Bucket': bucket_name, 'Key': image_key},
             ExpiresIn=604800
         )
+
+        print(f"✅ 圖片已儲存至本地: {local_path}，並上傳 S3 路徑: {image_key}")
+        return filename
+        
+    except requests.exceptions.HTTPError as e:
+        print(f"[API 錯誤] HTTP {e.response.status_code}: {e.response.text}")
+    except (boto3.exceptions.Boto3Error, Exception) as e:
+        print(f"[圖片同步/上傳失敗] {str(e)}")
+
+    return None
+    
+def create_hugo_post(title, content, image_filename=None):
+    """
+    建立 Hugo 格式的 Markdown 文章並儲存到 /tmp/content/posts/ 目錄
+    
+    Args:
+        title (str): 文章標題
+        content (str): 文章內容
+        image_filename (str, optional): 圖片檔名（如果有的話）
+    
+    Returns:
+        str: 建立的文章檔案路徑，失敗時回傳 None
+    """
+    try:
+        # 確保目錄存在
+        os.makedirs(HUGO_CONTENT_DIR, exist_ok=True)
+        
+        # 產生檔案名稱（使用時間戳避免重複）
+        timestamp = int(time.time())
+        safe_title = title.replace(" ", "-").replace("/", "-").replace(":", "-")[:50]
+        filename = f"{timestamp}-{safe_title}.md"
+        filepath = os.path.join(HUGO_CONTENT_DIR, filename)
+        
+        # 建立 front matter
+        current_date = datetime.now().strftime("%Y-%m-%dT%H:%M:%S+08:00")
+        front_matter = f"""---
+title: "{title}"
+date: {current_date}
+draft: false"""
+        
+        # 如果有圖片，加入 image 欄位
+        if image_filename:
+            front_matter += f'\nimage: "/images/{image_filename}"'
+        
+        front_matter += "\n---\n\n"
+        
+        # 如果有圖片，在內容開頭加入圖片
+        if image_filename:
+            markdown_content = f"{front_matter}![文章配圖](/images/{image_filename})\n\n{content}"
+        else:
+            markdown_content = f"{front_matter}{content}"
+        
+        # 寫入檔案
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(markdown_content)
+        
+        print(f"✅ Hugo 文章已建立：{filepath}")
+        return filepath
+        
     except Exception as e:
-        print(f"圖片生成或上傳失敗:  {str(e)}")
-        return "https://example.com/default-image.png"
+        print(f"[錯誤] 建立 Hugo 文章失敗：{str(e)}")
+        return None
+    
+def process_perplexity_content(parsed_title, parsed_content, sd_prompt):
+    """
+    處理 Perplexity 內容，生成圖片並建立 Hugo 文章
+    
+    Args:
+        parsed_title (str): 解析後的標題
+        parsed_content (str): 解析後的內容
+        sd_prompt (str): Stable Diffusion 提示詞
+    
+    Returns:
+        str: 建立的文章檔案路徑
+    """
+    try:
+        # 生成插圖並上傳到 S3 + 同步到本地
+        image_filename = generate_save_and_upload_image(
+            sd_prompt=sd_prompt,
+            bucket_name=os.environ['S3_BUCKET_NAME']
+        )
+        
+        # 建立 Hugo 文章
+        article_filepath = create_hugo_post(
+            title=parsed_title,
+            content=parsed_content,
+            image_filename=image_filename
+        )
+        
+        # 上傳到 S3
+        if article_filepath:
+            save_content_to_s3(
+                article_filepath, 
+                parsed_title, 
+                os.environ['S3_BUCKET_NAME']
+            )
+
+        return article_filepath
+        
+    except Exception as e:
+        print(f"[錯誤] 處理 Perplexity 內容失敗：{str(e)}")
+        return None
+
+# 如果你需要自動推送到 GitHub，可以加入以下函式
+def commit_and_push_to_github(filepath, title):
+    """
+    將新建立的文章推送到 GitHub
+    
+    Args:
+        filepath (str): 文章檔案路徑
+        title (str): 文章標題
+    """
+    try:
+        import subprocess
+        
+        # Git 操作
+        subprocess.run(["git", "add", filepath], check=True)
+        subprocess.run(["git", "commit", "-m", f"新增文章: {title}"], check=True)
+        subprocess.run(["git", "push"], check=True)
+        
+        print(f"✅ 文章已推送至 GitHub: {title}")
+        
+    except subprocess.CalledProcessError as e:
+        print(f"[Git 錯誤] 推送失敗：{str(e)}")
+    except Exception as e:
+        print(f"[錯誤] GitHub 推送失敗：{str(e)}")
+
+# 移除 Git 操作，改用 S3 或其他方式儲存：
+def save_content_to_s3(filepath, title, bucket_name):
+    """
+    將生成的內容上傳到 S3，而不是使用 Git 推送
+    """
+    try:
+        s3 = boto3.client('s3')
+        
+        # 上傳 Markdown 檔案到 S3
+        with open(filepath, 'rb') as f:
+            s3.upload_fileobj(
+                f,
+                bucket_name,
+                f"posts/{os.path.basename(filepath)}",
+                ExtraArgs={'ContentType': 'text/markdown'}
+            )
+        
+        print(f"✅ 內容已上傳至 S3: {title}")
+        return True
+        
+    except Exception as e:
+        print(f"[錯誤] S3 上傳失敗：{str(e)}")
+        return False
 
 def generate_ghost_token(admin_key):
     """生成 Ghost 專用 JWT 授權令牌"""
@@ -164,7 +333,7 @@ def check_Perplexity(ai_output, source, url):
     print(f"=== Perplexity API 檢查內容結束 ===")
 
 def parse_ai_response(ai_output):
-    """使用正則表達式解析 AI 回應"""
+    """使用正則表達式解析 AI 回應，並確保提示詞不為空"""
     try:
         title_match = re.search(r'【標題：】\s*(.+?)(?:\n|【內文：】|$)', ai_output, re.DOTALL)
         content_match = re.search(r'【內文：】\s*(.+?)(?:\n*【圖像提示詞：】|$)', ai_output, re.DOTALL)
@@ -172,6 +341,12 @@ def parse_ai_response(ai_output):
         title = title_match.group(1).strip() if title_match else ""
         content = content_match.group(1).strip() if content_match else ""
         sd_prompt = prompt_match.group(1).strip() if prompt_match else ""
+
+        # 驗證 SD 提示詞
+        if not sd_prompt or len(sd_prompt) < 5:
+            sd_prompt = "A professional, clean, minimalist illustration related to cryptocurrency and blockchain technology"
+            print(f"[警告] SD 提示詞過短或為空，使用預設值：{sd_prompt}")
+            
         return title, content, sd_prompt
     except Exception as e:
         print(f"解析錯誤: {str(e)}")
@@ -220,6 +395,8 @@ def markdown_to_html(md_content):
     return md_content
 
 def lambda_handler(event, context):
+    global S3_IMG_URL
+
     # 測試 Layer 是否正確載入
     # test_layers()
     
@@ -324,11 +501,15 @@ def lambda_handler(event, context):
                 raise ValueError("標題或內文解析為空")
             
             # 生成插圖
-            image_url = generate_and_upload_image(
-                sd_prompt=sd_prompt,
-                bucket_name=os.environ['S3_BUCKET_NAME']
+            article_filepath = process_perplexity_content(
+                parsed_title=title,
+                parsed_content=content,
+                sd_prompt=sd_prompt
                 )
-            md_content = f"![生成插圖]({image_url})\n\n{content}"
+            
+            # 如果需要推送到 GitHub
+            # if article_filepath:
+                # commit_and_push_to_github(article_filepath, title)
             
             # 生成 Ghost JWT
             ghost_token = generate_ghost_token(ghost_admin_key)
@@ -357,7 +538,7 @@ def lambda_handler(event, context):
                 "posts": [{
                     "title": title,
                     "mobiledoc": json.dumps(mobiledoc),
-                    "feature_image": image_url,  # 這裡放 Lambda 產生的圖片網址
+                    "feature_image": S3_IMG_URL,  # 這裡放 Lambda 產生的圖片網址
                     "status": "draft",
                     "tags": ["區塊鏈", "AI生成", "技術分析" if is_technical else "市場動態"]
                 }]
