@@ -1,5 +1,5 @@
 # 決定採用 AWS＋Perplexity＋StableDiffusion＋Hugo＋Netligy 架構
-# 021 同步儲存文章圖片到 /tmp/content/post、/tmp/static/images並上傳S3，在 Markdown 檔案的最前面插入 front matter，內容包含標題（title）、日期（date）、以及圖片路徑（image）。
+# 022 移除和Ghost相關程式
 import os
 import sys
 import json
@@ -246,17 +246,6 @@ def save_content_to_s3(filepath, title, bucket_name):
         print(f"[錯誤] S3 上傳失敗：{str(e)}")
         return False
 
-def generate_ghost_token(admin_key):
-    """生成 Ghost 專用 JWT 授權令牌"""
-    try:
-        id, secret = admin_key.split(':')
-        iat = int(time.time())
-        header = {'alg': 'HS256', 'typ': 'JWT', 'kid': id}
-        payload = {'iat': iat, 'exp': iat + 300, 'aud': '/admin/'}
-        return jwt.encode(payload, bytes.fromhex(secret), algorithm='HS256', headers=header)
-    except Exception as e:  
-        print(f"JWT生成失敗: {str(e)}")
-        raise
 
 def load_prompt_template():
     """從提示詞層載入提示詞模板"""
@@ -370,29 +359,6 @@ def build_markdown_output(title, content, source, url):
     else:
         return f"【標題：】{title}\n\n【內文：】\n{content}{disclaimer}"
 
-def markdown_to_html(md_content):
-    """
-    將 Markdown 轉換為 HTML（基本轉換）
-    """
-    # 轉換標題
-    md_content = re.sub(r'^#\s+(.+)$', r'<h1>\1</h1>', md_content, flags=re.MULTILINE)
-    md_content = re.sub(r'^##\s+(.+)$', r'<h2>\1</h2>', md_content, flags=re.MULTILINE)
-    md_content = re.sub(r'^###\s+(.+)$', r'<h3>\1</h3>', md_content, flags=re.MULTILINE)
-    
-    # 轉換粗體和斜體
-    md_content = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', md_content)
-    md_content = re.sub(r'\*(.*?)\*', r'<em>\1</em>', md_content)
-    
-    # 轉換列表
-    md_content = re.sub(r'^\*\s+(.+)$', r'<li>\1</li>', md_content, flags=re.MULTILINE)
-    md_content = re.sub(r'(<li>.*</li>)', r'<ul>\1</ul>', md_content, flags=re.DOTALL)
-    
-    # 轉換段落和換行
-    md_content = re.sub(r'\n\n', r'</p><p>', md_content)
-    md_content = '<p>' + md_content + '</p>'
-    md_content = md_content.replace('\n', '<br>')
-    
-    return md_content
 
 def lambda_handler(event, context):
     global S3_IMG_URL
@@ -511,56 +477,6 @@ def lambda_handler(event, context):
             # if article_filepath:
                 # commit_and_push_to_github(article_filepath, title)
             
-            # 生成 Ghost JWT
-            ghost_token = generate_ghost_token(ghost_admin_key)
-            
-            # 發布到 Ghost
-            ghost_headers = {
-                "Authorization": f"Ghost {ghost_token}",
-                "Content-Type": "application/json"
-            }
-
-            # 將 Markdown 轉換為 HTML
-            html_content = markdown_to_html(content)
-            
-            # 使用 mobiledoc 格式 (HTML 卡片)
-            mobiledoc = {
-                "version": "0.3.1",
-                "markups": [],
-                "atoms": [],
-                "cards": [
-                    ["html", {"html": html_content}]
-                ],
-                "sections": [[10, 0]]  # 引用第一個卡片
-            }
-
-            post_data = {
-                "posts": [{
-                    "title": title,
-                    "mobiledoc": json.dumps(mobiledoc),
-                    "feature_image": S3_IMG_URL,  # 這裡放 Lambda 產生的圖片網址
-                    "status": "draft",
-                    "tags": ["區塊鏈", "AI生成", "技術分析" if is_technical else "市場動態"]
-                }]
-            }
-            
-            # 發送請求到 Ghost
-            ghost_res = requests.post(
-                f"{ghost_blog_url}/ghost/api/admin/posts/",
-                json=post_data,
-                headers=ghost_headers
-            )
-            
-            ghost_res.raise_for_status()
-            
-            success_msg = f"✅ 已建立草稿: {title[:30]}... | 來源: {article['source']}"
-            print(success_msg)
-            
-            processed_articles.append({
-                "title": title,
-                "source": article['source'],
-                "status": "success"
-            })
 
         except requests.exceptions.Timeout:
             print(f"⏰ Perplexity API 超時: {article['url']}")
