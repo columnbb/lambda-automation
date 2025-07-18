@@ -39,3 +39,4 @@ alias ghost-update="/home/cloudshell-user/lambda-projects/ghost-automation/scrip
 alias ghost-update='/home/cloudshell-user/lambda-projects/ghost-automation/scripts/update-prompt-layer.sh'
 alias ghost-cd='cd /home/cloudshell-user/lambda-projects/ghost-automation'
 alias ghost-logs='ls -la /home/cloudshell-user/lambda-projects/ghost-automation/logs/'
+export PATH=$PATH:/usr/local/go/bin
