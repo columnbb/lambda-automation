@@ -1,5 +1,8 @@
 # 排除Hugo專案
 my-hugo-site/
 
+# 排除Hexo專案
+my-hexo-site/
+
 # 排除敏感資訊
 .ssh/id_ed25519

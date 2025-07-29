@@ -40,3 +40,7 @@ alias ghost-update='/home/cloudshell-user/lambda-projects/ghost-automation/scrip
 alias ghost-cd='cd /home/cloudshell-user/lambda-projects/ghost-automation'
 alias ghost-logs='ls -la /home/cloudshell-user/lambda-projects/ghost-automation/logs/'
 export PATH=$PATH:/usr/local/go/bin
+export PATH=~/.npm-global/bin:$PATH
+
+alias clearcache="find . -type d \( -name '.venv' -o -name '.terraform' -o -name '.cache' -o -name '.npm' \) -exec rm -rf {} +"
+
